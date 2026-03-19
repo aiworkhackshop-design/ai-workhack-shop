@@ -1,18 +1,51 @@
-name: Instagram Auto Post
+name: Instagram Reel Posting (Mon, Wed, Fri)
 
 on:
-  workflow_dispatch
+  schedule:
+    - cron: '0 3 * * 1,3,5'
+  workflow_dispatch:
 
 jobs:
-  post:
+  post-reel:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '22'
 
-      - run: node run_fetch.mjs
-      - run: node run_instagram.mjs
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          npm install
+          pip install moviepy pillow requests
+
+      - name: Post Reel
+        env:
+          FACEBOOK_PAGE_ACCESS_TOKEN: ${{ secrets.FACEBOOK_PAGE_ACCESS_TOKEN }}
+          INSTAGRAM_BUSINESS_ACCOUNT_ID: ${{ secrets.INSTAGRAM_BUSINESS_ACCOUNT_ID }}
+          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          CLOUDINARY_UPLOAD_PRESET: ${{ secrets.CLOUDINARY_UPLOAD_PRESET }}
+          RAKUTEN_APP_ID: ${{ secrets.RAKUTEN_APP_ID }}
+          RAKUTEN_ACCESS_KEY: ${{ secrets.RAKUTEN_ACCESS_KEY }}
+          API_VERSION: v21.0
+        run: |
+          node run_reel.mjs
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reel-posting-logs
+          path: |
+            *.log
+            .manus-logs/
+          retention-days: 7
