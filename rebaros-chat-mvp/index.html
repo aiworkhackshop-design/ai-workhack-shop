@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RebarOS Chat MVP</title>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <style>
+    :root{--bg:#0f172a;--panel:#111827;--card:#ffffff;--ink:#111827;--muted:#6b7280;--line:#d1d5db;--blue:#1d4ed8;--green:#047857;--red:#b91c1c;--yellow:#a16207;}
+    *{box-sizing:border-box} body{margin:0;background:#f3f4f6;color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif} 
+    header{background:var(--bg);color:white;padding:14px 16px;position:sticky;top:0;z-index:20;box-shadow:0 2px 10px rgba(0,0,0,.2)}
+    header h1{font-size:18px;margin:0} header p{margin:4px 0 0;color:#cbd5e1;font-size:12px}
+    .wrap{display:grid;grid-template-columns:360px 1fr 390px;gap:12px;padding:12px;max-width:1500px;margin:0 auto}
+    .panel{background:white;border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+    .panel h2{font-size:15px;margin:0;padding:12px 14px;background:#f8fafc;border-bottom:1px solid var(--line)}
+    .body{padding:12px}.chat{height:520px;overflow:auto;background:#f8fafc;padding:12px;border-bottom:1px solid var(--line)}
+    .msg{padding:10px 12px;border-radius:12px;margin:8px 0;line-height:1.45;font-size:14px;white-space:pre-wrap}.user{background:#dbeafe;margin-left:28px}.ai{background:white;border:1px solid #e5e7eb;margin-right:28px}
+    .row{display:flex;gap:8px;align-items:center}.row>*{flex:1}.cmd{display:flex;gap:8px;padding:12px;background:white}
+    input,select,textarea,button{font:inherit;border-radius:10px;border:1px solid var(--line);padding:10px;background:white} button{background:var(--blue);color:white;border:0;font-weight:700;cursor:pointer} button.secondary{background:#374151} button.good{background:var(--green)} button.warn{background:var(--yellow)} button.bad{background:var(--red)}
+    .drop{border:2px dashed #94a3b8;border-radius:14px;padding:18px;text-align:center;background:#f8fafc}.drop strong{display:block;margin-bottom:6px}.small{font-size:12px;color:var(--muted)}
+    .preview{max-width:100%;border:1px solid var(--line);border-radius:10px;margin-top:10px}.ocr{height:170px;overflow:auto;background:#0b1020;color:#d1d5db;border-radius:10px;padding:10px;font-family:ui-monospace,Menlo,monospace;font-size:12px;white-space:pre-wrap}
+    .card{border:1px solid var(--line);border-radius:12px;padding:10px;margin:10px 0;background:white}.card h3{font-size:14px;margin:0 0 8px;display:flex;justify-content:space-between}.grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:13px}.k{color:var(--muted)}
+    table{width:100%;border-collapse:collapse;font-size:12px} th,td{border:1px solid var(--line);padding:6px;text-align:left} th{background:#f3f4f6} .scroll{overflow:auto;max-height:420px}
+    .stat{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.stat div{background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:10px}.stat b{display:block;font-size:18px;margin-top:4px}
+    @media(max-width:980px){.wrap{display:block;padding:8px}.panel{margin-bottom:10px}.chat{height:360px}.cmd{position:sticky;bottom:0}.grid{grid-template-columns:1fr}.stat{grid-template-columns:1fr 1fr} }
+  </style>
+</head>
+<body>
+<header><h1>RebarOS Chat MVP</h1><p>加工帳画像 → 実OCR → 候補採用 → 重量集計 → 見積計算</p></header>
+<div class="wrap">
+  <section class="panel"><h2>1. 図面・加工帳アップロード</h2><div class="body">
+    <div class="drop" id="drop"><strong>画像をここに貼る / 選択</strong><span class="small">JPG / PNG対応。加工帳の写メでテストしてください。</span><br><br><input id="file" type="file" accept="image/*" /></div>
+    <img id="preview" class="preview" style="display:none" />
+    <div style="height:10px"></div>
+    <button id="runOcr" class="good" style="width:100%">この加工帳を読み取って</button>
+    <p class="small">※ブラウザ内でTesseract.js OCRを実行します。PDFは次フェーズでページ画像化します。</p>
+    <h2 style="margin:12px -12px 8px">OCR生テキスト</h2>
+    <div id="ocrText" class="ocr">未実行</div>
+  </div></section>
+
+  <section class="panel"><h2>2. チャット</h2>
+    <div id="chat" class="chat"></div>
+    <div class="cmd"><input id="message" placeholder="例：この加工帳を読み取って / D10だけ拾って / 材料160加工20運搬10取付70" /><button id="send">送信</button></div>
+  </section>
+
+  <section class="panel"><h2>3. 候補・集計</h2><div class="body">
+    <h3 style="margin:0 0 8px">加工帳候補</h3><div id="candidates"></div>
+    <h3>重量集計</h3><div id="stats" class="stat"></div>
+    <h3>見積</h3><div class="row"><input id="mat" type="number" value="160" title="材料"><input id="proc" type="number" value="20"><input id="ship" type="number" value="10"><input id="install" type="number" value="70"></div>
+    <p class="small">左から 材料 / 加工 / 運搬 / 取付（円/kg）</p><div id="estimate" class="stat"></div>
+    <button id="csv" class="secondary" style="width:100%;margin-top:8px">加工帳CSVを出力</button>
+  </div></section>
+</div>
+
+<section class="panel" style="margin:0 12px 18px"><h2>採用済み加工帳</h2><div class="body scroll"><table id="book"><thead><tr><th>No</th><th>名称</th><th>径</th><th>材質</th><th>形状</th><th>切寸</th><th>本数</th><th>箇所</th><th>合計</th><th>定尺</th><th>取数</th><th>必要本数</th><th>余り</th><th>歩留</th><th>重量kg</th><th>備考</th></tr></thead><tbody></tbody></table></div></section>
+
+<script>
+const unitWeights={D10:.56,D13:.995,D16:1.56,D19:2.25,D22:3.04,D25:3.98};
+let imageFile=null, rawText='', candidates=[], rows=JSON.parse(localStorage.getItem('rebarosRows')||'[]');
+const $=id=>document.getElementById(id);
+function ai(t){$('chat').insertAdjacentHTML('beforeend',`<div class="msg ai">${escapeHtml(t)}</div>`);$('chat').scrollTop=$('chat').scrollHeight}
+function user(t){$('chat').insertAdjacentHTML('beforeend',`<div class="msg user">${escapeHtml(t)}</div>`);$('chat').scrollTop=$('chat').scrollHeight}
+function escapeHtml(s){return String(s).replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}
+function recalc(r){r.total=(+r.qty||0)*(+r.places||1);r.pieces=Math.floor((+r.stock||0)/(+r.cut||1));r.required=r.pieces>0?Math.ceil(r.total/r.pieces):0;r.leftover=r.pieces>0?r.stock-r.cut*r.pieces:0;r.yield=r.stock>0&&r.pieces>0?((r.cut*r.pieces/r.stock)*100):0;r.unit=unitWeights[r.dia]||0;r.weight=(r.cut/1000)*r.total*r.unit;return r}
+function normalizeDigits(s){return String(s).replace(/[０-９]/g,ch=>String.fromCharCode(ch.charCodeAt(0)-0xFEE0)).replace(/Ｄ/g,'D').replace(/ＳＤ/g,'SD')}
+function parseCandidates(text){
+  const t=normalizeDigits(text).replace(/\s+/g,' ');
+  const out=[];
+  const dias=[...t.matchAll(/D\s*(10|13|16|19|22|25)/gi)];
+  const mats=[...t.matchAll(/SD\s*(295|345|390)/gi)];
+  const nums=[...t.matchAll(/\b\d{1,5}\b/g)].map(m=>+m[0]);
+  const cutPool=nums.filter(n=>n>=300&&n<=12000);
+  const qtyPool=nums.filter(n=>n>0&&n<=300);
+  let no=1;
+  // Table-like row parser: No, name, Dxx, SDxxx, cut, qty, places, total, stock, pieces, required
+  const lines=normalizeDigits(text).split(/\n+/).map(x=>x.trim()).filter(Boolean);
+  for(const line of lines){
+    const dia=(line.match(/D\s*(10|13|16|19|22|25)/i)||[])[1]; if(!dia) continue;
+    const mat='SD'+((line.match(/SD\s*(295|345|390)/i)||[])[1]||295);
+    const ns=[...line.matchAll(/\b\d{1,5}\b/g)].map(m=>+m[0]);
+    const cuts=ns.filter(n=>n>=300&&n<=12000); const stocks=cuts.filter(n=>[3500,4000,4500,5000,5500,6000].includes(n));
+    const cut=cuts.find(n=>![3500,4000,4500,5000,5500,6000].includes(n))||cuts[0]; if(!cut) continue;
+    const stock=stocks[0]||bestStock(cut);
+    const small=ns.filter(n=>n>0&&n<=300); const qty=small.length?small[Math.min(1,small.length-1)]:1;
+    out.push(recalc({no:no++,name:String(ns[0]||no),dia:'D'+dia,material:mat,shape:'直筋',cut,qty,places:1,stock,source:line,confidence:line.length>8?82:55,note:'OCR候補'}));
+  }
+  if(out.length) return mergeSimilar(out).slice(0,30);
+  // fallback: pair diameter with nearby cut/qty candidates
+  const primaryDia=dias[0]?'D'+dias[0][1]:'D10'; const primaryMat=mats[0]?'SD'+mats[0][1]:'SD295';
+  const uniqueCuts=[...new Set(cutPool)].filter(n=>![3500,4000,4500,5000,5500,6000].includes(n)).slice(0,18);
+  uniqueCuts.forEach((cut,i)=>out.push(recalc({no:i+1,name:String(i+1),dia:primaryDia,material:primaryMat,shape:'直筋',cut,qty:qtyPool[i]||1,places:1,stock:bestStock(cut),source:'OCR数値候補',confidence:50,note:'要確認'})));
+  return out;
+}
+function mergeSimilar(arr){const seen=new Set();return arr.filter(r=>{const k=[r.dia,r.cut,r.qty,r.stock].join('-');if(seen.has(k))return false;seen.add(k);return true})}
+function bestStock(cut){const stocks=[6000,5500,5000,4500,4000,3500];let best=stocks[0],bestWaste=1e9;for(const s of stocks){const p=Math.floor(s/cut);if(p<1)continue;const waste=s-cut*p;if(waste<bestWaste){best=s;bestWaste=waste}}return best}
+function renderCandidates(){const el=$('candidates');el.innerHTML='';if(!candidates.length){el.innerHTML='<p class="small">候補なし</p>';return}candidates.forEach((r,i)=>{el.insertAdjacentHTML('beforeend',`<div class="card"><h3>候補 No.${r.no}<span>${r.confidence||0}%</span></h3><div class="grid"><span><b>${r.dia}</b> ${r.material}</span><span>切寸 ${r.cut}mm</span><span>本数 ${r.qty}</span><span>定尺 ${r.stock}</span><span>取数 ${r.pieces}</span><span>必要 ${r.required}本</span><span>重量 ${r.weight.toFixed(2)}kg</span><span>余り ${r.leftover}mm</span></div><p class="small">${escapeHtml(r.source||'')}</p><div class="row"><button class="good" onclick="adopt(${i})">採用</button><button class="warn" onclick="editAdopt(${i})">修正採用</button><button class="bad" onclick="ignoreCand(${i})">無視</button></div></div>`)});}
+function adopt(i){rows.push(recalc({...candidates[i]}));save();ai(`候補No.${candidates[i].no}を加工帳に採用しました。`)}
+function editAdopt(i){const r={...candidates[i]};const cut=prompt('切寸mm',r.cut);if(cut!==null)r.cut=+cut;const qty=prompt('本数',r.qty);if(qty!==null)r.qty=+qty;const dia=prompt('径 D10/D13/D16/D19/D22/D25',r.dia);if(dia)r.dia=dia.toUpperCase();rows.push(recalc(r));save();ai(`修正して採用しました。${r.dia} L=${r.cut} ${r.qty}本`)}
+function ignoreCand(i){candidates.splice(i,1);renderCandidates()}
+function save(){localStorage.setItem('rebarosRows',JSON.stringify(rows));renderRows();renderStats();renderEstimate()}
+function renderRows(){const tb=$('book').querySelector('tbody');tb.innerHTML='';rows.forEach(r=>tb.insertAdjacentHTML('beforeend',`<tr><td>${r.no}</td><td>${escapeHtml(r.name)}</td><td>${r.dia}</td><td>${r.material}</td><td>${r.shape}</td><td>${r.cut}</td><td>${r.qty}</td><td>${r.places}</td><td>${r.total}</td><td>${r.stock}</td><td>${r.pieces}</td><td>${r.required}</td><td>${r.leftover}</td><td>${r.yield.toFixed(1)}%</td><td>${r.weight.toFixed(2)}</td><td>${escapeHtml(r.note||'')}</td></tr>`))}
+function renderStats(){const sums={};let total=0;rows.forEach(r=>{sums[r.dia]=(sums[r.dia]||0)+r.weight;total+=r.weight});$('stats').innerHTML=Object.entries(sums).map(([d,w])=>`<div>${d}<b>${w.toFixed(1)}kg</b></div>`).join('')+`<div>合計<b>${total.toFixed(1)}kg</b></div><div>t換算<b>${(total/1000).toFixed(3)}t</b></div>`}
+function renderEstimate(){let kg=rows.reduce((s,r)=>s+r.weight,0);let mat=+$('mat').value||0,proc=+$('proc').value||0,ship=+$('ship').value||0,inst=+$('install').value||0;let subtotal=kg*(mat+proc+ship+inst);$('estimate').innerHTML=`<div>税別<b>${Math.round(subtotal).toLocaleString()}円</b></div><div>税込<b>${Math.round(subtotal*1.1).toLocaleString()}円</b></div>`}
+async function runOCR(){if(!imageFile){ai('画像を先にアップロードしてください。');return}ai('OCRを開始します。画像から実際に文字を読み取ります。');$('ocrText').textContent='OCR実行中...';try{const {data}=await Tesseract.recognize(imageFile,'jpn+eng',{logger:m=>{if(m.status)$('ocrText').textContent=`${m.status} ${Math.round((m.progress||0)*100)}%`}});rawText=data.text||'';$('ocrText').textContent=rawText||'文字を検出できませんでした。';candidates=parseCandidates(rawText);renderCandidates();ai(`OCR完了。加工帳候補を${candidates.length}件作成しました。候補を確認して採用してください。`)}catch(e){$('ocrText').textContent=String(e);ai('OCRでエラーが出ました。画像を明るく正面から撮影し直してください。')}}
+function handleFile(f){imageFile=f;const url=URL.createObjectURL(f);$('preview').src=url;$('preview').style.display='block';ai(`画像「${f.name}」を受け取りました。「この加工帳を読み取って」でOCRします。`)}
+$('file').addEventListener('change',e=>{if(e.target.files[0])handleFile(e.target.files[0])});
+$('drop').addEventListener('dragover',e=>{e.preventDefault();$('drop').style.background='#dbeafe'});$('drop').addEventListener('dragleave',e=>{$('drop').style.background='#f8fafc'});$('drop').addEventListener('drop',e=>{e.preventDefault();$('drop').style.background='#f8fafc';if(e.dataTransfer.files[0])handleFile(e.dataTransfer.files[0])});
+$('runOcr').onclick=runOCR;$('send').onclick=()=>{const m=$('message').value.trim();if(!m)return;user(m);$('message').value='';if(/読|OCR|拾/.test(m))runOCR();else if(/D10だけ/.test(m)){candidates=candidates.filter(r=>r.dia==='D10');renderCandidates();ai('D10候補だけに絞りました。')}else if(/材料/.test(m)){const nums=[...m.matchAll(/\d+/g)].map(x=>+x[0]);if(nums.length>=4){$('mat').value=nums[0];$('proc').value=nums[1];$('ship').value=nums[2];$('install').value=nums[3];renderEstimate();ai('単価を反映して見積を更新しました。')}}else ai('対応コマンド：この加工帳を読み取って / D10だけ拾って / 材料160加工20運搬10取付70')};
+['mat','proc','ship','install'].forEach(id=>$(id).addEventListener('input',renderEstimate));
+$('csv').onclick=()=>{const head=['No','名称','径','材質','形状','切寸','本数','箇所','合計','定尺','取数','必要本数','余り','歩留','重量kg','備考'];const lines=[head.join(',')].concat(rows.map(r=>[r.no,r.name,r.dia,r.material,r.shape,r.cut,r.qty,r.places,r.total,r.stock,r.pieces,r.required,r.leftover,r.yield.toFixed(1),r.weight.toFixed(2),r.note||''].join(',')));const blob=new Blob(['\ufeff'+lines.join('\n')],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='rebaros加工帳.csv';a.click()};
+ai('RebarOS Chat MVPを起動しました。加工帳画像をアップロードして「この加工帳を読み取って」と入力してください。');renderRows();renderStats();renderEstimate();
+</script>
+</body>
+</html>
