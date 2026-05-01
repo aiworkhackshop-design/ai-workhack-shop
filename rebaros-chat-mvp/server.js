@@ -1,12 +1,10 @@
 const express = require('express');
 const multer = require('multer');
 const OpenAI = require('openai');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: 90000, maxRetries: 2 });
 
 app.use(express.static(__dirname));
 app.use(express.json({ limit: '2mb' }));
@@ -23,33 +21,45 @@ const schemaHint = `あなたは日本の鉄筋拾い出し・加工帳作成の
 }
 ルール: 意匠図や表紙から無理に拾わない。寸法と配筋がない候補は出さない。仕様書があれば仕様を優先。D10継手450、D13継手550、D16継手650を初期値にする。`;
 
+function cleanJson(text) {
+  const raw = String(text || '{}').trim();
+  try { return JSON.parse(raw); } catch (_) {}
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (m) return JSON.parse(m[0]);
+  return { page_classification: [], takeoff_candidates: [], warnings: ['AI JSON parse failed'] };
+}
+
 app.post('/api/analyze-page', upload.single('image'), async (req, res) => {
   try {
     if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: 'OPENAI_API_KEY is not set on Render.' });
     if (!req.file) return res.status(400).json({ error: 'image is required' });
     const page = req.body.page || 'unknown';
+    const model = process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini';
     const dataUrl = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
     const response = await client.chat.completions.create({
-      model: process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini',
+      model,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: schemaHint },
         { role: 'user', content: [
-          { type: 'text', text: `これはPDFのPage ${page}です。このページを分類し、鉄筋拾い候補があれば作ってください。` },
-          { type: 'image_url', image_url: { url: dataUrl, detail: 'high' } }
+          { type: 'text', text: `PDFのPage ${page}です。ページ分類と鉄筋拾い候補だけをJSONで返してください。` },
+          { type: 'image_url', image_url: { url: dataUrl, detail: 'low' } }
         ]}
       ],
       temperature: 0.1,
-      max_tokens: 2500
+      max_tokens: 1800
     });
-    const text = response.choices[0].message.content || '{}';
-    res.json(JSON.parse(text));
+    const text = response.choices?.[0]?.message?.content || '{}';
+    res.json(cleanJson(text));
   } catch (err) {
-    res.status(500).json({ error: err.message || String(err) });
+    const status = err.status || err.code || 500;
+    const msg = err.message || String(err);
+    console.error('[analyze-page error]', { status, msg });
+    res.status(500).json({ error: msg, hint: 'Check OPENAI_API_KEY, OPENAI_VISION_MODEL, image size, and Render logs.' });
   }
 });
 
-app.get('/health', (_, res) => res.json({ ok: true }));
+app.get('/health', (_, res) => res.json({ ok: true, mode: 'vision', model: process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini' }));
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`RebarOS Vision server running on ${port}`));
