@@ -15,17 +15,21 @@ function selectedModel() {
   return configured;
 }
 
-const schemaHint = `あなたは日本の鉄筋拾い出し・基礎伏図の専門家です。図面ページを読み、いきなり加工帳を作らず、まず基礎伏図専用の「拾い分解表」をJSONだけで返してください。
+const schemaHint = `あなたは日本の鉄筋拾い出し・基礎伏図の専門家です。対象は鉄筋屋の拾いだけです。アンカーボルト、型枠、コンクリート、設備配管は鉄筋加工帳の対象外として扱ってください。
+
+目的:
+図面ページから「文字」だけでなく、基礎の構造を想像できるように、鉄筋対象を構造オブジェクト化してJSONだけで返してください。
 
 最重要ルール:
+- アンカーボルトは鉄筋屋の加工帳対象外。foundation_breakdownにも出さない。
 - F1/F2などの基礎梁を勝手に作らない。
 - 表紙/配置図/平面図/立面図/意匠図から鉄筋を拾わない。
-- 基礎伏図・布基礎断面詳細・基礎仕様・人通口補強・土間配筋だけを対象にする。
+- 対象は、外周布基礎、内部布基礎、土間配筋、人通口補強筋、スリーブ補強の5項目。
 - 図面右側の仕様欄、断面詳細、凡例、基礎伏図内の注記を優先して読む。
 - 読めた文字は必ず read/spec にそのまま要約して入れる。「情報が不明」だけで逃げない。
-- ただし確定できない寸法を加工帳に入れない。
+- 3D/半3D表示に使える geometry_hint を必ず返す。
+- 確定できない寸法を加工帳に入れない。
 - 切寸・本数・形状が確定したものだけ fabrication_book_rows に入れる。
-- 不明なものは foundation_breakdown の status を「要確認」にする。
 - JSON以外の文章は返さない。
 
 返却JSON形式:
@@ -44,7 +48,7 @@ const schemaHint = `あなたは日本の鉄筋拾い出し・基礎伏図の専
   },
   "foundation_breakdown":[
     {
-      "category":"外周布基礎|内部布基礎|土間配筋|人通口補強筋|スリーブ補強|アンカーボルト",
+      "category":"外周布基礎|内部布基礎|土間配筋|人通口補強筋|スリーブ補強",
       "page":1,
       "status":"拾い可能|要確認|対象外",
       "confidence":0,
@@ -53,6 +57,7 @@ const schemaHint = `あなたは日本の鉄筋拾い出し・基礎伏図の専
       "spec":"仕様・径・ピッチ・補強内容",
       "quantity_basis":"延長/面積/箇所数などの根拠",
       "action":"加工帳化可能|延長確認|面積確認|箇所確認|対象外",
+      "geometry_hint":{"kind":"footing_line|slab_mesh|opening_reinforcement|sleeve_reinforcement","count":0,"width":0,"height":0,"dia":"","pitch":0,"visual_note":"半3Dでどう見せるか"},
       "fabrication_rows":[]
     }
   ],
@@ -60,13 +65,12 @@ const schemaHint = `あなたは日本の鉄筋拾い出し・基礎伏図の専
   "warnings":[]
 }
 
-今回のような基礎伏図では、最低限次の6項目を foundation_breakdown に必ず出す:
+最低限、次の5項目を foundation_breakdown に必ず出す:
 1. 外周布基礎
 2. 内部布基礎
 3. 土間配筋
 4. 人通口補強筋
 5. スリーブ補強
-6. アンカーボルト
 
 加工帳行を返してよい条件:
 - cut > 0
@@ -99,10 +103,13 @@ function sanitize(parsed) {
   parsed.page_classification = Array.isArray(parsed.page_classification) ? parsed.page_classification : [];
   parsed.foundation_breakdown = Array.isArray(parsed.foundation_breakdown) ? parsed.foundation_breakdown : [];
   parsed.fabrication_book_rows = Array.isArray(parsed.fabrication_book_rows) ? parsed.fabrication_book_rows.filter(isValidFabRow) : [];
-  parsed.foundation_breakdown = parsed.foundation_breakdown.map(x => ({
-    ...x,
-    fabrication_rows: Array.isArray(x.fabrication_rows) ? x.fabrication_rows.filter(isValidFabRow) : []
-  }));
+  parsed.foundation_breakdown = parsed.foundation_breakdown
+    .filter(x => !String(x.category || '').includes('アンカー'))
+    .map(x => ({
+      ...x,
+      geometry_hint: x.geometry_hint || { kind: 'footing_line', count: 0, visual_note: '' },
+      fabrication_rows: Array.isArray(x.fabrication_rows) ? x.fabrication_rows.filter(isValidFabRow) : []
+    }));
   return parsed;
 }
 
@@ -113,7 +120,7 @@ async function callOpenAI({ model, page, dataUrl }) {
     messages: [
       { role: 'system', content: schemaHint },
       { role: 'user', content: [
-        { type: 'text', text: `PDFのPage ${page}です。基礎伏図専用の拾い分解表 foundation_breakdown を作ってください。図面右側の仕様欄と断面詳細を重点的に読んでください。確定できないものは要確認で止めてください。` },
+        { type: 'text', text: `PDFのPage ${page}です。鉄筋屋対象のみで、基礎伏図専用の拾い分解表 foundation_breakdown を作ってください。アンカーボルトは除外。図面右側の仕様欄と断面詳細を重点的に読み、半3D表示用のgeometry_hintも返してください。` },
         { type: 'image_url', image_url: { url: dataUrl, detail: 'high' } }
       ]}
     ],
@@ -142,7 +149,7 @@ app.post('/api/analyze-page', upload.single('image'), async (req, res) => {
   }
 });
 
-app.get('/health', (_, res) => res.json({ ok: true, mode: 'foundation-breakdown-hires', model: selectedModel(), apiKey: apiKeyInfo() }));
+app.get('/health', (_, res) => res.json({ ok: true, mode: 'foundation-3d-breakdown-no-anchor', model: selectedModel(), apiKey: apiKeyInfo() }));
 
 app.get('/api/check-openai', async (_, res) => {
   try {
