@@ -3,11 +3,17 @@ const multer = require('multer');
 const OpenAI = require('openai');
 
 const app = express();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: 90000, maxRetries: 2 });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: 120000, maxRetries: 2 });
 
 app.use(express.static(__dirname));
 app.use(express.json({ limit: '2mb' }));
+
+function selectedModel() {
+  const configured = process.env.OPENAI_VISION_MODEL || '';
+  if (!configured || configured.includes('mini')) return 'gpt-4o';
+  return configured;
+}
 
 const schemaHint = `あなたは日本の鉄筋拾い出し・基礎伏図の専門家です。図面ページを読み、いきなり加工帳を作らず、まず基礎伏図専用の「拾い分解表」をJSONだけで返してください。
 
@@ -15,7 +21,9 @@ const schemaHint = `あなたは日本の鉄筋拾い出し・基礎伏図の専
 - F1/F2などの基礎梁を勝手に作らない。
 - 表紙/配置図/平面図/立面図/意匠図から鉄筋を拾わない。
 - 基礎伏図・布基礎断面詳細・基礎仕様・人通口補強・土間配筋だけを対象にする。
-- 確定できない寸法を加工帳に入れない。
+- 図面右側の仕様欄、断面詳細、凡例、基礎伏図内の注記を優先して読む。
+- 読めた文字は必ず read/spec にそのまま要約して入れる。「情報が不明」だけで逃げない。
+- ただし確定できない寸法を加工帳に入れない。
 - 切寸・本数・形状が確定したものだけ fabrication_book_rows に入れる。
 - 不明なものは foundation_breakdown の status を「要確認」にする。
 - JSON以外の文章は返さない。
@@ -40,34 +48,15 @@ const schemaHint = `あなたは日本の鉄筋拾い出し・基礎伏図の専
       "page":1,
       "status":"拾い可能|要確認|対象外",
       "confidence":0,
-      "read":"図面から読めた情報",
+      "read":"図面から読めた情報。D10@250、D10@300SC、人通口600x350 6か所等を読めたら必ず書く",
       "missing":"不足している情報",
-      "spec":"例: D10@250 / D10@300SC / 1-D13 / 人通口600x350 6か所",
+      "spec":"仕様・径・ピッチ・補強内容",
       "quantity_basis":"延長/面積/箇所数などの根拠",
       "action":"加工帳化可能|延長確認|面積確認|箇所確認|対象外",
       "fabrication_rows":[]
     }
   ],
-  "fabrication_book_rows":[
-    {
-      "mark":"",
-      "member":"土間配筋",
-      "floor":"1F",
-      "location":"基礎伏図",
-      "dia":"D10",
-      "material":"SD295A",
-      "shape":"直筋",
-      "a":0,"b":0,"c":0,"d":0,
-      "cut":0,
-      "qty":0,
-      "places":1,
-      "total_qty":0,
-      "stock":6000,
-      "unit_weight":0.56,
-      "process":"切断",
-      "note":"根拠ページ/根拠寸法"
-    }
-  ],
+  "fabrication_book_rows":[],
   "warnings":[]
 }
 
@@ -124,7 +113,7 @@ async function callOpenAI({ model, page, dataUrl }) {
     messages: [
       { role: 'system', content: schemaHint },
       { role: 'user', content: [
-        { type: 'text', text: `PDFのPage ${page}です。基礎伏図専用の拾い分解表 foundation_breakdown を作ってください。確定できないものは要確認で止めてください。` },
+        { type: 'text', text: `PDFのPage ${page}です。基礎伏図専用の拾い分解表 foundation_breakdown を作ってください。図面右側の仕様欄と断面詳細を重点的に読んでください。確定できないものは要確認で止めてください。` },
         { type: 'image_url', image_url: { url: dataUrl, detail: 'high' } }
       ]}
     ],
@@ -139,7 +128,7 @@ app.post('/api/analyze-page', upload.single('image'), async (req, res) => {
     if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: 'OPENAI_API_KEY is not set on Render.', apiKey: apiKeyInfo() });
     if (!req.file) return res.status(400).json({ error: 'image is required' });
     const page = req.body.page || 'unknown';
-    const model = process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini';
+    const model = selectedModel();
     const dataUrl = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
     const text = await callOpenAI({ model, page, dataUrl });
     const parsed = sanitize(cleanJson(text));
@@ -153,12 +142,12 @@ app.post('/api/analyze-page', upload.single('image'), async (req, res) => {
   }
 });
 
-app.get('/health', (_, res) => res.json({ ok: true, mode: 'foundation-breakdown', model: process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini', apiKey: apiKeyInfo() }));
+app.get('/health', (_, res) => res.json({ ok: true, mode: 'foundation-breakdown-hires', model: selectedModel(), apiKey: apiKeyInfo() }));
 
 app.get('/api/check-openai', async (_, res) => {
   try {
     if (!process.env.OPENAI_API_KEY) return res.status(500).json({ ok: false, error: 'OPENAI_API_KEY is not set', apiKey: apiKeyInfo() });
-    const model = process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini';
+    const model = selectedModel();
     const response = await client.chat.completions.create({
       model,
       messages: [{ role: 'user', content: 'Reply with JSON: {"ok":true}' }],
