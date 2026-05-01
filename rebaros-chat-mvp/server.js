@@ -9,9 +9,17 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: 90000, 
 app.use(express.static(__dirname));
 app.use(express.json({ limit: '2mb' }));
 
-const schemaHint = `あなたは日本の鉄筋拾い出し・鉄筋加工帳作成の専門家です。鉄之助・加工帳之助の実務イメージで、図面ページを読み、ページ分類、拾い候補、鉄筋加工帳行をJSONだけで返してください。
+const schemaHint = `あなたは日本の鉄筋拾い出し・鉄筋加工帳作成の専門家です。図面ページを読み、ページ分類と拾い候補をJSONだけで返してください。
 
-必ず次のJSON形式で返してください。
+最重要ルール:
+- 寸法、径、本数、形状が確定できないものを fabrication_book_rows に入れてはいけません。
+- cut が0、qty が0、寸法不明、配筋不明の行は fabrication_book_rows に絶対に入れないでください。
+- 不明なものは takeoff_candidates にだけ入れ、needs_human_check=true、reasonに不足項目を書いてください。
+- 表紙・意匠図・建具表・設備図から鉄筋加工帳を作ってはいけません。
+- 同じ根拠の候補をページまたぎで量産してはいけません。
+- JSON以外の文章は返さないでください。
+
+返却JSON形式:
 {
   "project_type":"鉄筋工事",
   "page_classification":[
@@ -39,66 +47,23 @@ const schemaHint = `あなたは日本の鉄筋拾い出し・鉄筋加工帳作
       "qty":0,
       "shape":"直筋|フック|スターラップ|L型|コ型",
       "confidence":0,
-      "reason":"",
+      "reason":"読めた情報と不足情報を書く",
       "needs_human_check":true,
-      "fabrication_rows":[
-        {
-          "mark":"F1",
-          "member":"基礎梁",
-          "floor":"1F",
-          "location":"X1-X3/Y2",
-          "dia":"D13",
-          "material":"SD295",
-          "shape":"直筋",
-          "a":0,
-          "b":0,
-          "c":0,
-          "d":0,
-          "cut":0,
-          "qty":0,
-          "places":1,
-          "total_qty":0,
-          "stock":6000,
-          "unit_weight":0.995,
-          "process":"切断|曲げ|スターラップ",
-          "note":"根拠を書く"
-        }
-      ]
+      "fabrication_rows":[]
     }
   ],
-  "fabrication_book_rows":[
-    {
-      "mark":"F1",
-      "member":"基礎梁",
-      "floor":"1F",
-      "location":"X1-X3/Y2",
-      "dia":"D13",
-      "material":"SD295",
-      "shape":"直筋",
-      "a":0,
-      "b":0,
-      "c":0,
-      "d":0,
-      "cut":0,
-      "qty":0,
-      "places":1,
-      "total_qty":0,
-      "stock":6000,
-      "unit_weight":0.995,
-      "process":"切断",
-      "note":""
-    }
-  ],
+  "fabrication_book_rows":[],
   "warnings":[]
 }
 
-重要ルール:
-- 表紙・意匠図・建具表・設備図から無理に拾わない。
-- 寸法・径・本数・ピッチが足りない場合は、confidenceを低くし、needs_human_check=trueにする。
-- 加工帳行は必ず mark/member/location/dia/shape/cut/qty/total_qty/unit_weight を埋める。分からない値は0または空欄にし、noteに不足理由を書く。
-- D10継手450、D13継手550、D16継手650を初期仕様として扱う。
-- 切寸が定尺6000を超える場合は、継手を考慮した分割が必要とnoteに書く。
-- JSON以外の文章は返さない。`;
+加工帳行を返してよい条件:
+- cut > 0
+- qty > 0
+- dia が D10/D13/D16/D19/D22/D25 のいずれか
+- member が空欄でない
+- shape が空欄でない
+- noteに根拠ページ/根拠寸法を書く
+上記を満たさない場合、fabrication_book_rows は空配列にしてください。`;
 
 function cleanJson(text) {
   const raw = String(text || '{}').trim();
@@ -113,6 +78,23 @@ function apiKeyInfo() {
   return { exists: !!key, prefix: key ? key.slice(0, 7) : null, length: key.length };
 }
 
+function isValidFabRow(r) {
+  const dia = String(r?.dia || '').toUpperCase();
+  const diaOk = ['D10','D13','D16','D19','D22','D25'].includes(dia);
+  return diaOk && Number(r?.cut) > 0 && Number(r?.qty) > 0 && String(r?.member || '').trim() && String(r?.shape || '').trim();
+}
+
+function sanitize(parsed) {
+  parsed.page_classification = Array.isArray(parsed.page_classification) ? parsed.page_classification : [];
+  parsed.takeoff_candidates = Array.isArray(parsed.takeoff_candidates) ? parsed.takeoff_candidates : [];
+  parsed.fabrication_book_rows = Array.isArray(parsed.fabrication_book_rows) ? parsed.fabrication_book_rows.filter(isValidFabRow) : [];
+  parsed.takeoff_candidates = parsed.takeoff_candidates.map(c => ({
+    ...c,
+    fabrication_rows: Array.isArray(c.fabrication_rows) ? c.fabrication_rows.filter(isValidFabRow) : []
+  }));
+  return parsed;
+}
+
 async function callOpenAI({ model, page, dataUrl }) {
   const response = await client.chat.completions.create({
     model,
@@ -120,11 +102,11 @@ async function callOpenAI({ model, page, dataUrl }) {
     messages: [
       { role: 'system', content: schemaHint },
       { role: 'user', content: [
-        { type: 'text', text: `PDFのPage ${page}です。ページ分類、拾い候補、鉄筋加工帳行をJSONで返してください。` },
+        { type: 'text', text: `PDFのPage ${page}です。確定できる加工帳行だけ fabrication_book_rows に入れてください。不明なら候補だけ返してください。` },
         { type: 'image_url', image_url: { url: dataUrl, detail: 'low' } }
       ]}
     ],
-    temperature: 0.1,
+    temperature: 0,
     max_tokens: 3000
   });
   return response.choices?.[0]?.message?.content || '{}';
@@ -138,7 +120,7 @@ app.post('/api/analyze-page', upload.single('image'), async (req, res) => {
     const model = process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini';
     const dataUrl = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
     const text = await callOpenAI({ model, page, dataUrl });
-    const parsed = cleanJson(text);
+    const parsed = sanitize(cleanJson(text));
     parsed._debug = { model, page, imageBytes: req.file.size, apiKey: apiKeyInfo() };
     res.json(parsed);
   } catch (err) {
@@ -149,7 +131,7 @@ app.post('/api/analyze-page', upload.single('image'), async (req, res) => {
   }
 });
 
-app.get('/health', (_, res) => res.json({ ok: true, mode: 'vision-fabrication-book', model: process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini', apiKey: apiKeyInfo() }));
+app.get('/health', (_, res) => res.json({ ok: true, mode: 'vision-fabrication-book-strict', model: process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini', apiKey: apiKeyInfo() }));
 
 app.get('/api/check-openai', async (_, res) => {
   try {
