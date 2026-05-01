@@ -9,60 +9,82 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: 90000, 
 app.use(express.static(__dirname));
 app.use(express.json({ limit: '2mb' }));
 
-const schemaHint = `あなたは日本の鉄筋拾い出し・鉄筋加工帳作成の専門家です。図面ページを読み、ページ分類と拾い候補をJSONだけで返してください。
+const schemaHint = `あなたは日本の鉄筋拾い出し・基礎伏図の専門家です。図面ページを読み、いきなり加工帳を作らず、まず基礎伏図専用の「拾い分解表」をJSONだけで返してください。
 
 最重要ルール:
-- 寸法、径、本数、形状が確定できないものを fabrication_book_rows に入れてはいけません。
-- cut が0、qty が0、寸法不明、配筋不明の行は fabrication_book_rows に絶対に入れないでください。
-- 不明なものは takeoff_candidates にだけ入れ、needs_human_check=true、reasonに不足項目を書いてください。
-- 表紙・意匠図・建具表・設備図から鉄筋加工帳を作ってはいけません。
-- 同じ根拠の候補をページまたぎで量産してはいけません。
-- JSON以外の文章は返さないでください。
+- F1/F2などの基礎梁を勝手に作らない。
+- 表紙/配置図/平面図/立面図/意匠図から鉄筋を拾わない。
+- 基礎伏図・布基礎断面詳細・基礎仕様・人通口補強・土間配筋だけを対象にする。
+- 確定できない寸法を加工帳に入れない。
+- 切寸・本数・形状が確定したものだけ fabrication_book_rows に入れる。
+- 不明なものは foundation_breakdown の status を「要確認」にする。
+- JSON以外の文章は返さない。
 
 返却JSON形式:
 {
   "project_type":"鉄筋工事",
   "page_classification":[
-    {"page":1,"type":"表紙|仕様書|基礎伏図|基礎リスト|断面詳細|土間|壁|柱|梁|スラブ|対象外","confidence":0,"reason":""}
+    {"page":1,"type":"表紙|配置図|平面図|立面図|基礎伏図|断面詳細|基礎仕様|対象外","confidence":0,"reason":""}
   ],
   "spec_master":{
-    "lap":{"D10":450,"D13":550,"D16":650,"D19":800,"D22":900,"D25":1000},
+    "rebar":"SD295A D10-D13",
+    "lap":{"D10":450,"D13":550,"D16":650},
     "cover":60,
     "stock":6000,
-    "unit_weight":{"D10":0.56,"D13":0.995,"D16":1.56,"D19":2.25,"D22":3.04,"D25":3.98},
+    "unit_weight":{"D10":0.56,"D13":0.995,"D16":1.56},
     "notes":[]
   },
-  "takeoff_candidates":[
+  "foundation_breakdown":[
     {
-      "type":"基礎梁|土間|壁|柱|スラブ|任意",
+      "category":"外周布基礎|内部布基礎|土間配筋|人通口補強筋|スリーブ補強|アンカーボルト",
       "page":1,
-      "member":"基礎梁",
-      "mark":"F1",
-      "location":"X1-X3/Y2",
-      "dia":"D13",
-      "main":"4-D13",
-      "stirrup":"D10@200",
-      "pitch":200,
-      "length":0,
-      "qty":0,
-      "shape":"直筋|フック|スターラップ|L型|コ型",
+      "status":"拾い可能|要確認|対象外",
       "confidence":0,
-      "reason":"読めた情報と不足情報を書く",
-      "needs_human_check":true,
+      "read":"図面から読めた情報",
+      "missing":"不足している情報",
+      "spec":"例: D10@250 / D10@300SC / 1-D13 / 人通口600x350 6か所",
+      "quantity_basis":"延長/面積/箇所数などの根拠",
+      "action":"加工帳化可能|延長確認|面積確認|箇所確認|対象外",
       "fabrication_rows":[]
     }
   ],
-  "fabrication_book_rows":[],
+  "fabrication_book_rows":[
+    {
+      "mark":"",
+      "member":"土間配筋",
+      "floor":"1F",
+      "location":"基礎伏図",
+      "dia":"D10",
+      "material":"SD295A",
+      "shape":"直筋",
+      "a":0,"b":0,"c":0,"d":0,
+      "cut":0,
+      "qty":0,
+      "places":1,
+      "total_qty":0,
+      "stock":6000,
+      "unit_weight":0.56,
+      "process":"切断",
+      "note":"根拠ページ/根拠寸法"
+    }
+  ],
   "warnings":[]
 }
+
+今回のような基礎伏図では、最低限次の6項目を foundation_breakdown に必ず出す:
+1. 外周布基礎
+2. 内部布基礎
+3. 土間配筋
+4. 人通口補強筋
+5. スリーブ補強
+6. アンカーボルト
 
 加工帳行を返してよい条件:
 - cut > 0
 - qty > 0
-- dia が D10/D13/D16/D19/D22/D25 のいずれか
+- dia が D10/D13/D16 のいずれか
 - member が空欄でない
 - shape が空欄でない
-- noteに根拠ページ/根拠寸法を書く
 上記を満たさない場合、fabrication_book_rows は空配列にしてください。`;
 
 function cleanJson(text) {
@@ -70,7 +92,7 @@ function cleanJson(text) {
   try { return JSON.parse(raw); } catch (_) {}
   const m = raw.match(/\{[\s\S]*\}/);
   if (m) return JSON.parse(m[0]);
-  return { page_classification: [], takeoff_candidates: [], fabrication_book_rows: [], warnings: ['AI JSON parse failed'], raw };
+  return { page_classification: [], foundation_breakdown: [], fabrication_book_rows: [], warnings: ['AI JSON parse failed'], raw };
 }
 
 function apiKeyInfo() {
@@ -80,17 +102,17 @@ function apiKeyInfo() {
 
 function isValidFabRow(r) {
   const dia = String(r?.dia || '').toUpperCase();
-  const diaOk = ['D10','D13','D16','D19','D22','D25'].includes(dia);
+  const diaOk = ['D10','D13','D16'].includes(dia);
   return diaOk && Number(r?.cut) > 0 && Number(r?.qty) > 0 && String(r?.member || '').trim() && String(r?.shape || '').trim();
 }
 
 function sanitize(parsed) {
   parsed.page_classification = Array.isArray(parsed.page_classification) ? parsed.page_classification : [];
-  parsed.takeoff_candidates = Array.isArray(parsed.takeoff_candidates) ? parsed.takeoff_candidates : [];
+  parsed.foundation_breakdown = Array.isArray(parsed.foundation_breakdown) ? parsed.foundation_breakdown : [];
   parsed.fabrication_book_rows = Array.isArray(parsed.fabrication_book_rows) ? parsed.fabrication_book_rows.filter(isValidFabRow) : [];
-  parsed.takeoff_candidates = parsed.takeoff_candidates.map(c => ({
-    ...c,
-    fabrication_rows: Array.isArray(c.fabrication_rows) ? c.fabrication_rows.filter(isValidFabRow) : []
+  parsed.foundation_breakdown = parsed.foundation_breakdown.map(x => ({
+    ...x,
+    fabrication_rows: Array.isArray(x.fabrication_rows) ? x.fabrication_rows.filter(isValidFabRow) : []
   }));
   return parsed;
 }
@@ -102,12 +124,12 @@ async function callOpenAI({ model, page, dataUrl }) {
     messages: [
       { role: 'system', content: schemaHint },
       { role: 'user', content: [
-        { type: 'text', text: `PDFのPage ${page}です。確定できる加工帳行だけ fabrication_book_rows に入れてください。不明なら候補だけ返してください。` },
-        { type: 'image_url', image_url: { url: dataUrl, detail: 'low' } }
+        { type: 'text', text: `PDFのPage ${page}です。基礎伏図専用の拾い分解表 foundation_breakdown を作ってください。確定できないものは要確認で止めてください。` },
+        { type: 'image_url', image_url: { url: dataUrl, detail: 'high' } }
       ]}
     ],
     temperature: 0,
-    max_tokens: 3000
+    max_tokens: 4000
   });
   return response.choices?.[0]?.message?.content || '{}';
 }
@@ -131,7 +153,7 @@ app.post('/api/analyze-page', upload.single('image'), async (req, res) => {
   }
 });
 
-app.get('/health', (_, res) => res.json({ ok: true, mode: 'vision-fabrication-book-strict', model: process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini', apiKey: apiKeyInfo() }));
+app.get('/health', (_, res) => res.json({ ok: true, mode: 'foundation-breakdown', model: process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini', apiKey: apiKeyInfo() }));
 
 app.get('/api/check-openai', async (_, res) => {
   try {
