@@ -29,7 +29,8 @@ const schemaHint = `あなたは日本の鉄筋拾い出し・基礎伏図の専
 - 読めた文字は必ず read/spec にそのまま要約して入れる。「情報が不明」だけで逃げない。
 - 3D/半3D表示に使える geometry_hint を必ず返す。
 - 確定できない寸法を加工帳に入れない。
-- 切寸・本数・形状が確定したものだけ fabrication_book_rows に入れる。
+- 切寸・本数・形状が確定したものだけ fabrication_rows / fabrication_book_rows に入れる。
+- fabrication_rows が空の場合、status は必ず「要確認」にする。「拾い可能」にしない。
 - JSON以外の文章は返さない。
 
 返却JSON形式:
@@ -50,13 +51,13 @@ const schemaHint = `あなたは日本の鉄筋拾い出し・基礎伏図の専
     {
       "category":"外周布基礎|内部布基礎|土間配筋|人通口補強筋|スリーブ補強",
       "page":1,
-      "status":"拾い可能|要確認|対象外",
+      "status":"要確認|拾い可能|対象外",
       "confidence":0,
       "read":"図面から読めた情報。D10@250、D10@300SC、人通口600x350 6か所等を読めたら必ず書く",
-      "missing":"不足している情報",
+      "missing":"加工帳化に不足している情報。例: 延長未確定、面積未確定、補強筋形状未確定",
       "spec":"仕様・径・ピッチ・補強内容",
       "quantity_basis":"延長/面積/箇所数などの根拠",
-      "action":"加工帳化可能|延長確認|面積確認|箇所確認|対象外",
+      "action":"延長確認|面積確認|形状確認|箇所確認|加工帳化可能|対象外",
       "geometry_hint":{"kind":"footing_line|slab_mesh|opening_reinforcement|sleeve_reinforcement","count":0,"width":0,"height":0,"dia":"","pitch":0,"visual_note":"半3Dでどう見せるか"},
       "fabrication_rows":[]
     }
@@ -105,11 +106,21 @@ function sanitize(parsed) {
   parsed.fabrication_book_rows = Array.isArray(parsed.fabrication_book_rows) ? parsed.fabrication_book_rows.filter(isValidFabRow) : [];
   parsed.foundation_breakdown = parsed.foundation_breakdown
     .filter(x => !String(x.category || '').includes('アンカー'))
-    .map(x => ({
-      ...x,
-      geometry_hint: x.geometry_hint || { kind: 'footing_line', count: 0, visual_note: '' },
-      fabrication_rows: Array.isArray(x.fabrication_rows) ? x.fabrication_rows.filter(isValidFabRow) : []
-    }));
+    .map(x => {
+      const validRows = Array.isArray(x.fabrication_rows) ? x.fabrication_rows.filter(isValidFabRow) : [];
+      const hasRows = validRows.length > 0;
+      const next = {
+        ...x,
+        geometry_hint: x.geometry_hint || { kind: 'footing_line', count: 0, visual_note: '' },
+        fabrication_rows: validRows
+      };
+      if (!hasRows && next.status === '拾い可能') {
+        next.status = '要確認';
+        next.action = next.action && next.action !== '加工帳化可能' ? next.action : '加工帳化には切寸・本数・形状の確定が必要';
+        next.missing = next.missing || '切寸・本数・形状が未確定のため加工帳未反映';
+      }
+      return next;
+    });
   return parsed;
 }
 
@@ -120,7 +131,7 @@ async function callOpenAI({ model, page, dataUrl }) {
     messages: [
       { role: 'system', content: schemaHint },
       { role: 'user', content: [
-        { type: 'text', text: `PDFのPage ${page}です。鉄筋屋対象のみで、基礎伏図専用の拾い分解表 foundation_breakdown を作ってください。アンカーボルトは除外。図面右側の仕様欄と断面詳細を重点的に読み、半3D表示用のgeometry_hintも返してください。` },
+        { type: 'text', text: `PDFのPage ${page}です。鉄筋屋対象のみで、基礎伏図専用の拾い分解表 foundation_breakdown を作ってください。アンカーボルトは除外。fabrication_rows が作れないものは必ず status=要確認 にしてください。` },
         { type: 'image_url', image_url: { url: dataUrl, detail: 'high' } }
       ]}
     ],
@@ -149,7 +160,7 @@ app.post('/api/analyze-page', upload.single('image'), async (req, res) => {
   }
 });
 
-app.get('/health', (_, res) => res.json({ ok: true, mode: 'foundation-3d-breakdown-no-anchor', model: selectedModel(), apiKey: apiKeyInfo() }));
+app.get('/health', (_, res) => res.json({ ok: true, mode: 'foundation-3d-breakdown-no-anchor-strict-book', model: selectedModel(), apiKey: apiKeyInfo() }));
 
 app.get('/api/check-openai', async (_, res) => {
   try {
